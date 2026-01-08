@@ -8,6 +8,7 @@
   <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/viz.js/2.1.2/viz.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/viz.js/2.1.2/full.render.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/svg-pan-zoom@3.6.1/dist/svg-pan-zoom.min.js"></script>
   <script src="./json.js"></script>
   <style>
     body {
@@ -44,6 +45,7 @@
   <script>
     const viz = new Viz();
     const USE_TEST_DATA = false; // Toggle for local testing vs Grist
+    let panZoomInstance;
 
     function showError(msg) {
       const errorDiv = document.getElementById('error');
@@ -57,28 +59,52 @@
       }
 
       let dot = 'digraph G {\n';
-      dot += '  rankdir=TB;\n';
+      dot += '  rankdir=LR;\n';
       dot += '  ranksep=1.5;\n';
       dot += '  nodesep=0.5;\n';
       dot += '  node [shape=box, style="rounded,filled", fillcolor="#e3f2fd", fontsize=12];\n';
       dot += '  edge [color="#1976d2", penwidth=2, arrowsize=0.8];\n\n';
 
+      // Track which nodes have connections
+      const connectedNodes = new Set();
       const nodeMap = new Map();
+
+      // Build node map
       records.forEach(record => {
         const id = String(record.id);
         const label = record.Name || `Lead ${id}`;
         nodeMap.set(id, label);
+      });
+
+      // First pass: identify all connected nodes
+      records.forEach(record => {
+        const fromId = String(record.id);
+        const referrers = record['Referred Me'];
+
+        if (referrers && Array.isArray(referrers) && referrers.length > 0) {
+          referrers.forEach(referrerId => {
+            const refIdStr = String(referrerId);
+            if (nodeMap.has(refIdStr)) {
+              connectedNodes.add(fromId);
+              connectedNodes.add(refIdStr);
+            }
+          });
+        }
+      });
+
+      // Only add connected nodes
+      connectedNodes.forEach(id => {
+        const label = nodeMap.get(id);
         dot += `  "${id}" [label="${label}"];\n`;
       });
 
       dot += '\n  // Edges\n';
 
+      // Create edges
       let edgeCount = 0;
       records.forEach(record => {
         const fromId = String(record.id);
-        const referrers = record['Referred_Me'];
-
-        console.log(`Processing record ${fromId}:`, referrers);
+        const referrers = record['Referred Me'];
 
         if (referrers && Array.isArray(referrers)) {
           referrers.forEach(referrerId => {
@@ -86,18 +112,17 @@
             if (nodeMap.has(refIdStr)) {
               dot += `  "${refIdStr}" -> "${fromId}";\n`;
               edgeCount++;
-            } else {
-              console.log(`Referrer ${refIdStr} not found in nodeMap`);
             }
           });
         }
       });
 
-      console.log(`Created ${edgeCount} edges`);
+      console.log(`Connected nodes: ${connectedNodes.size}, Created ${edgeCount} edges`);
 
       dot += '}';
       return dot;
     }
+
 
     function renderGraph(records) {
       try {
@@ -109,6 +134,19 @@
             const graphDiv = document.getElementById('graph');
             graphDiv.innerHTML = '';
             graphDiv.appendChild(svg);
+
+            // Add zoom/pan
+            if (panZoomInstance) {
+              panZoomInstance.destroy();
+            }
+            panZoomInstance = svgPanZoom(svg, {
+              zoomEnabled: true,
+              controlIconsEnabled: true,
+              fit: true,
+              center: true,
+              minZoom: 0.1,
+              maxZoom: 10
+            });
           })
           .catch(err => showError('Render error: ' + err.message));
       } catch (error) {
@@ -127,12 +165,14 @@
 
           await grist.setOptions({
             allowSelectBy: true,
-            columns: ['Name', 'Referred_Me']
+            columns: ['Name', 'Referred_Me'],
+            requiredAccess: 'read table'
           });
 
           grist.onRecords(function (records) {
             console.log('Received records:', records);
             renderGraph(records);
+
           });
         } catch (error) {
           showError('Error connecting to Grist: ' + error.message);
